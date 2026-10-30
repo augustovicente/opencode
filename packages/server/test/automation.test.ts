@@ -17,7 +17,7 @@ const client = (handler: (request: Request) => Promise<Response>) =>
     }),
   })
 
-it.live("manages schedules by default through the experimental API and honors experimental.schedules: false", () =>
+it.live("manages schedules by default through the experimental API and honors experimental.automations: false", () =>
   Effect.gen(function* () {
     const dir = (yield* tmpdirScoped("opencode-schedule-api-")).path
     const global = path.join(dir, "global")
@@ -25,7 +25,7 @@ it.live("manages schedules by default through the experimental API and honors ex
     const disabled = path.join(dir, "disabled")
     yield* Effect.promise(async () => {
       await Promise.all([global, enabled, disabled].map((item) => fs.mkdir(item, { recursive: true })))
-      await fs.writeFile(path.join(disabled, "opencode.json"), JSON.stringify({ experimental: { schedules: false } }))
+      await fs.writeFile(path.join(disabled, "opencode.json"), JSON.stringify({ experimental: { automations: false } }))
     })
     const handler = yield* ServerFetch.make({
       app: { version: "test" },
@@ -46,7 +46,7 @@ it.live("manages schedules by default through the experimental API and honors ex
 
     yield* Effect.promise(async () => {
       const session = await api.session.create({ location: { directory: enabled } })
-      const created = await api.experimental.schedule.create({
+      const created = await api.experimental.automation.create({
         sessionID: session.id,
         name: "build",
         when: { every: "1 hour" },
@@ -61,41 +61,52 @@ it.live("manages schedules by default through the experimental API and honors ex
         status: "active",
         remainingRuns: 3,
       })
-      expect(await api.experimental.schedule.list({ sessionID: session.id })).toMatchObject([{ id: created.id }])
-      expect(await api.experimental.schedule.get({ scheduleID: created.id })).toMatchObject({ id: created.id })
-      expect(await api.experimental.schedule.pause({ scheduleID: created.id })).toMatchObject({ status: "paused" })
-      expect(await api.experimental.schedule.resume({ scheduleID: created.id })).toMatchObject({ status: "active" })
-      await api.experimental.schedule.delete({ scheduleID: created.id })
-      await expect(api.experimental.schedule.get({ scheduleID: created.id })).rejects.toMatchObject({
-        _tag: "ScheduleNotFoundError",
+      expect(await api.experimental.automation.list({ sessionID: session.id })).toMatchObject([{ id: created.id }])
+      expect(await api.experimental.automation.list()).toMatchObject([{ id: created.id }])
+      expect(await api.experimental.automation.get({ automationID: created.id })).toMatchObject({ id: created.id })
+      expect(await api.experimental.automation.pause({ automationID: created.id })).toMatchObject({ status: "paused" })
+      expect(await api.experimental.automation.resume({ automationID: created.id })).toMatchObject({ status: "active" })
+      await api.experimental.automation.delete({ automationID: created.id })
+      await expect(api.experimental.automation.get({ automationID: created.id })).rejects.toMatchObject({
+        _tag: "AutomationNotFoundError",
       })
 
       await expect(
-        api.experimental.schedule.create({ sessionID: session.id, when: { every: "soon" }, prompt: "ping" }),
+        api.experimental.automation.create({ sessionID: session.id, when: { every: "soon" }, prompt: "ping" }),
       ).rejects.toMatchObject({ _tag: "InvalidRequestError" })
       // Two triggers would otherwise decode as the first one, silently turning a repeat into a one-shot.
-      const twoTriggers = await handlerRequest("/api/experimental/schedule", {
+      const twoTriggers = await handlerRequest("/api/experimental/automation", {
         sessionID: session.id,
         when: { in: "5 minutes", every: "1 hour" },
         prompt: "ping",
       })
       expect(twoTriggers.status).toBe(400)
-      expect(await api.experimental.schedule.list({ sessionID: session.id })).toEqual([])
+      expect(await api.experimental.automation.list({ sessionID: session.id })).toEqual([])
       await expect(
-        api.experimental.schedule.create({ sessionID: session.id, when: { in: "0 seconds" }, prompt: "ping" }),
+        api.experimental.automation.create({ sessionID: session.id, when: { in: "0 seconds" }, prompt: "ping" }),
       ).rejects.toMatchObject({ _tag: "InvalidRequestError", message: "Duration must be positive: 0 seconds" })
 
-      // Off where the Session lives: nothing can be created or read.
+      // Legacy experimental.schedules: false continues to disable automations in that project.
+      const legacyOffDir = path.join(dir, "legacy-disabled")
+      await fs.mkdir(legacyOffDir, { recursive: true })
+      await fs.writeFile(
+        path.join(legacyOffDir, "opencode.json"),
+        JSON.stringify({ experimental: { schedules: false } }),
+      )
+      const legacyOff = await api.session.create({ location: { directory: legacyOffDir } })
+      await expect(
+        api.experimental.automation.create({ sessionID: legacyOff.id, when: { in: "5 minutes" }, prompt: "ping" }),
+      ).rejects.toMatchObject({ _tag: "ForbiddenError" })
       const off = await api.session.create({ location: { directory: disabled } })
       await expect(
-        api.experimental.schedule.create({ sessionID: off.id, when: { in: "5 minutes" }, prompt: "ping" }),
+        api.experimental.automation.create({ sessionID: off.id, when: { in: "5 minutes" }, prompt: "ping" }),
       ).rejects.toMatchObject({ _tag: "ForbiddenError" })
-      await expect(api.experimental.schedule.list({ sessionID: off.id })).rejects.toMatchObject({
+      await expect(api.experimental.automation.list({ sessionID: off.id })).rejects.toMatchObject({
         _tag: "ForbiddenError",
       })
 
       // Shell until check that already passes returns done immediately with its output.
-      const matched = await api.experimental.schedule.create({
+      const matched = await api.experimental.automation.create({
         sessionID: session.id,
         until: { run: "printf ready" },
         prompt: "ready now",
@@ -112,11 +123,11 @@ it.live("manages schedules by default through the experimental API and honors ex
       await fs.mkdir(askDir, { recursive: true })
       await fs.writeFile(
         path.join(askDir, "opencode.json"),
-        JSON.stringify({ experimental: { schedules: true }, permission: { shell: "ask" } }),
+        JSON.stringify({ experimental: { automations: true }, permission: { shell: "ask" } }),
       )
       const askSession = await api.session.create({ location: { directory: askDir } })
       await expect(
-        api.experimental.schedule.create({
+        api.experimental.automation.create({
           sessionID: askSession.id,
           until: { run: "printf blocked" },
           prompt: "never",
@@ -124,7 +135,7 @@ it.live("manages schedules by default through the experimental API and honors ex
       ).rejects.toMatchObject({ _tag: "ForbiddenError" })
 
       // Code Mode until check works end-to-end with no allow field, and { run, code } together is 400.
-      const codeMatched = await api.experimental.schedule.create({
+      const codeMatched = await api.experimental.automation.create({
         sessionID: session.id,
         until: { code: 'return { wake: true, message: "models=" + (await tools.opencode.models({})).total }' },
         prompt: "models checked",
@@ -135,7 +146,7 @@ it.live("manages schedules by default through the experimental API and honors ex
         lastOutput: expect.stringContaining("models="),
         until: { type: "code" },
       })
-      const mixed = await handlerRequest("/api/experimental/schedule", {
+      const mixed = await handlerRequest("/api/experimental/automation", {
         sessionID: session.id,
         until: { run: "true", code: "return true" },
         prompt: "ping",
@@ -154,7 +165,7 @@ it.live("ticks due schedules in standalone ServerProcess.start without lifecycle
     yield* Effect.promise(async () => {
       await fs.writeFile(path.join(dir, "opencode.json"), JSON.stringify({ permission: { shell: "allow" } }))
       const session = await api.session.create({ location: { directory: dir } })
-      const created = await api.experimental.schedule.create({
+      const created = await api.experimental.automation.create({
         sessionID: session.id,
         when: { in: "150 millis" },
         if: { run: "false" },
@@ -166,7 +177,7 @@ it.live("ticks due schedules in standalone ServerProcess.start without lifecycle
       let current = created
       while (current.status === "active" && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 50))
-        current = await api.experimental.schedule.get({ scheduleID: created.id })
+        current = await api.experimental.automation.get({ automationID: created.id })
       }
       expect(current).toMatchObject({
         status: "done",
@@ -198,7 +209,7 @@ it.live("elects one scheduler leader when two server processes boot against a du
         const seededApi = client(handler)
         return yield* Effect.promise(async () => {
           const session = await seededApi.session.create({ location: { directory: dir } })
-          const created = await seededApi.experimental.schedule.create({
+          const created = await seededApi.experimental.automation.create({
             sessionID: session.id,
             when: { in: "80 millis" },
             if: { run: `printf 'x\\n' >> ${JSON.stringify(marker)} && false` },
@@ -231,10 +242,10 @@ it.live("elects one scheduler leader when two server processes boot against a du
 
     yield* Effect.promise(async () => {
       const deadline = Date.now() + 5_000
-      let current = await api.experimental.schedule.get({ scheduleID: createdID })
+      let current = await api.experimental.automation.get({ automationID: createdID })
       while (current.status === "active" && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 50))
-        current = await api.experimental.schedule.get({ scheduleID: createdID })
+        current = await api.experimental.automation.get({ automationID: createdID })
       }
       await new Promise((resolve) => setTimeout(resolve, 150))
       const lines = (await fs.readFile(marker, "utf8")).trim().split("\n").filter(Boolean)
